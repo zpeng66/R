@@ -1,0 +1,513 @@
+---
+title: "Group 2: CHOL Analysis"
+author: "Zhongsheng Peng"
+date: "11/08/2019"
+output:
+  word_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+Notes:
+  - You do not have to put all of your team members' code into a single file. I have included all 5 analyses just for your information. You only need the code for your analysis.
+  - The tasks include both coding and written interpretation.
+  - Please knit to word document -- it will make it easier to combine your results with your team members in to the single manuscript (submitted in GP4).
+
+## Setup
+
+### Load packages
+
+Add whatever additional packages you need for your analysis
+
+```{r setup, include=FALSE}
+### EDIT!!!
+
+### We use the code chunk option "include=FALSE" because we don't need to print this information
+
+### Global knitr options
+knitr::opts_chunk$set(echo = TRUE)
+
+### Load packages/libraries that we will need
+library(tidyverse)
+library(viridis)    # Better plot colors
+library(viridisLite)
+library(cluster)    # clustering algorithms
+library(factoextra) # clustering algorithms & visualization
+library(ggdendro)   # clustering visualization
+library(dendextend) # for comparing two dendrograms
+
+#  edit! Add whatever additional packages you need here (if you haven't loaded them, RMarkdown should alert you when you go to "knit" the RMarkdown to a report)
+```
+
+### Custom ggplot theme
+
+So that we don't need to add this code to all ggplots individually. Feel free to use or not use, and to modify however you wish.
+
+```{r theme}
+
+### DON'T EDIT CODE IN THIS CHUNK
+
+theme_custom <- theme_bw() +
+
+  # if we have a plot title or subtitle, let's center it
+  theme (
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+theme_set(theme_custom)
+
+### We'll make the viridis color scale our default plotting color palette
+scale_colour_continuous <- function(...) {
+  scale_colour_viridis_c(...)
+}
+scale_fill_continuous <- function(...) {
+  scale_fill_viridis_c(...)
+}
+scale_colour_discrete <- function(...) {
+  scale_colour_viridis_d(..., begin = 0, end = 0.9)
+}
+scale_fill_discrete <- function(...) {
+  scale_fill_viridis_d(..., begin = 0, end = 0.9)
+}
+```
+
+### Setwd fix (if needed)
+
+If you are having trouble loading the exprs_tidy file below, manually override the working directory. To do this
+  1. In the menu bar, click: Session > Set Working Directory > To Source File Location
+  2. Copy the line of code in the console, and paste it into the code chunk below
+
+```{r fix_setwd}
+### EDIT if necessary
+
+```
+
+### FYI: how I got the data
+
+```{r get_data, eval=FALSE}
+### Get list of available datasets
+### https://www.bioconductor.org/packages/3.3/bioc/vignettes/TCGAbiolinks/inst/doc/tcgaBiolinks.html#harmonized-data-1
+View(getGDCprojects())
+
+### Datasets to use for group project (I picked the ones with smallest sample size and no sex bias)
+projects <- c(
+  "TCGA-ACC",
+  "TCGA-CHOL",
+  "TCGA-DLBC",
+  "TCGA-KICH",
+  "TCGA-MESO",
+  "TCGA-UVM"
+)
+
+phenoList <-  vector(mode = "list", length = length(projects))
+names(phenoList) <- projects
+exprsList <-  vector(mode = "list", length = length(projects))
+names(exprsList) <- projects
+for (i in projects) {
+  ### Get data (in summarized experiment ["se"]  format)
+  query <- GDCquery(
+    project = i,
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "HTSeq - FPKM"
+  )
+  GDCdownload(query)
+  se <- GDCprepare(query)
+
+  ### Extract phenoData and remove columns that either are all different or all consistent
+  pheno_full <- as.data.frame(colData(se))
+  pheno <- janitor::remove_constant(pheno_full)
+
+  ### Extract exprs matrix and remove lowly expressed
+  exprs_full <- assay(se)
+  keep <- rowSums(exprs_full > 1) >= 10
+  exprs <- exprs_full[keep, ]
+
+  ### Shorten the sample id
+  rownames(pheno) <- abbreviate(gsub("TCGA-OR-", "", rownames(pheno)), method = "both")
+  pheno$id <- rownames(pheno)
+  colnames(exprs) <- abbreviate(gsub("TCGA-OR-", "", colnames(exprs)), method = "both")
+
+  ### Remove extra columns (not groups)
+  pheno$sample <- pheno$id
+  pheno$id <- NULL
+  remove_cols <- c(
+    "patient", "updated_datetime", "updated_datetime.x", "updated_datetime.y",
+    "barcode", "diagnosis_id", "demographic_id", "exposure_id", "bcr_patient_barcode",
+    "morphology", "treatments",
+    "days_to_birth", "days_to_last_follow_up", "days_to_death",
+    "year_of_birth", "year_of_diagnosis", "year_of_death"
+  )
+  pheno <- pheno[ , !(colnames(pheno) %in% remove_cols)]
+  pheno <- pheno[ , !(colnames(pheno) %in% colnames(pheno)[grep("_CHOL_del|_CHOL_amp|subtype_", colnames(pheno))])]
+
+  ### Save
+  saveRDS(exprs, paste0(i, "_exprs.rds"))
+  saveRDS(pheno, paste0(i, "_pheno.rds"))
+
+  ### Add to list
+  exprsList[[i]]  <- exprs
+  phenoList[[i]] <- pheno
+
+  ### Clean up
+  rm(exprs)
+  rm(exprs_full)
+  rm(pheno)
+  rm(pheno_full)
+  rm(keep)
+}
+
+### Save
+saveRDS(exprsList, "all_exprs.rds")
+saveRDS(phenoList, "all_pheno.rds")
+
+### Look at
+sapply(exprsList, dim)
+sapply(phenoList, dim)
+sapply(phenoList, names)
+
+### Write out names
+rbind(
+  paste("ACC:", toString(sort(names(phenoList$`TCGA-ACC`)))),
+  paste("CHOL:", toString(sort(names(phenoList$`TCGA-CHOL`)))),
+  paste("DLBC:", toString(sort(names(phenoList$`TCGA-DLBC`)))),
+  paste("KICH:", toString(sort(names(phenoList$`TCGA-KICH`)))),
+  paste("MESO:", toString(sort(names(phenoList$`TCGA-MESO`)))),
+  paste("UVM:", toString(sort(names(phenoList$`TCGA-UVM`))))
+) %>%
+  writeLines("sample_variables.txt")
+```
+
+## Pre-process data
+
+Your entire team should use the same code for this section!
+
+### Load your dataset
+
+```{r load_data}
+### EDIT: You need to insert your dataset file names in the quotes below
+
+exprs <- readRDS("TCGA-CHOL_exprs.rds")     # EDIT: insert your *_exprs.rds dataset's file name here
+
+pheno <- readRDS("TCGA-CHOL_pheno.rds")     # EDIT: insert your *_pheno.rds dataset's file name here
+```
+
+### Fix sample names
+
+```{r}
+colnames(exprs) <- gsub("-", "_", colnames(exprs))
+rownames(pheno) <- gsub("-", "_", rownames(pheno))
+pheno$sample <- rownames(pheno)
+```
+
+### Pick your group (variable of interest) [edit!]
+
+This should be a variable that is categorical with at least 2 categories and at least 3 samples in each category Use colnames(pheno) to find out what variable options you have. You can use one of the descriptive summary functions (from AE3) to determine how many categories there are for each group, and how many samples there are for each category.
+
+```{r select_group}
+### EDIT!! Copy your variable of interest into a new column called "group". This will help generalize/simplify your project's code
+
+pheno$group <- pheno$shortLetterCode # EDIT: insert your variable's column name here
+```
+
+### Filter samples
+
+Check for samples with missing data for your "group"
+
+```{r filter_samples_check}
+### Don't edit
+
+### You can check this using the following (many other ways to check too)
+### Make sure no "blanks" either --
+### sometimes missing data isn't converted to an NA but instead is just blank
+summary(as.factor(pheno$group)) # look for blanks, no data, etc. categories
+table(is.na(pheno$group))
+```
+
+Remove samples with missing data (or no data; i.e. "not reported") for your "group". First from phenoData
+
+```{r filter_samples_remove}
+### Don't edit
+
+### Remove NAs
+pheno <- pheno[!is.na(pheno$group), ]
+
+### Remove blanks
+pheno <- pheno[!(pheno$group == ""), ]
+
+### Remove "not reported"
+pheno <- pheno[!(pheno$group == "not reported"), ]
+```
+
+And also from exprsData
+
+```{r}
+### Don't edit
+
+exprs <- exprs[ , which(colnames(exprs) %in% rownames(pheno))]
+
+```
+
+### Filter genes
+
+Low expression: Here we'll require FPKM > 5 in at least 25 samples (it will help reduce computational time)
+
+```{r filter_genes}
+### Don't edit
+
+### Filter
+exprs <- exprs[rowSums(exprs > 5) > 25, ]
+```
+
+### Finalize data
+
+Match order of samples in both pheno (rownames) and exprs (colnames) datasets
+
+```{r matrices}
+### Don't edit
+
+### Match order of samples in both matrices
+table(colnames(exprs) == rownames(pheno)) # check
+pheno <- pheno[match(colnames(exprs), rownames(pheno)), ] # fixes if needed
+table(colnames(exprs) == rownames(pheno)) # check
+```
+
+Convert expression matrix to tidy, so that we also have a tidy version of the data in case we need it.
+
+```{r tidy}
+### Don't edit
+
+### Create tibble with expression and pheno data
+tidy <- exprs %>%
+
+  # Convert expression matrix to tidy tibble
+  as_tibble(rownames = "gene") %>%
+  gather("sample", "fpkm", -gene)  %>%
+
+  # Add phenoData
+  inner_join(pheno, by = "sample")
+
+length(unique(tidy$gene))
+```
+
+## Team Member #3: Hierarchical clustering
+
+Tasks:
+  a. Determine ideal clustering methods (including # clusters)
+  b. Generate a final figure of the clustering
+  c. Provide table summarizing the number of samples in each cluster and the breakdown of samples by your group of interest
+  d. Interpret the clustering results
+
+### Prepare data
+
+```{r hc_prep}
+### Check for missing/infinite data
+table(is.na(exprs))
+
+### Transpose matrix so that we're clustering samples (not genes)
+exprs_mat <- t(exprs)
+
+### Log transform
+exprs_mat <-log(exprs_mat + 0.0001, base = 2)
+
+### Scale
+set.seed(1234)
+exprs_mat <- scale(exprs_mat)
+```
+
+### Compare HC methods
+
+```{r hc_options}
+### Vector of all HC methods that agnes() allows
+agnes_methods <- c("average", "single", "complete", "ward", "weighted")
+```
+```{r hc_method}
+### Try all combinations
+for (i in agnes_methods) {
+  
+  # Reproducibility
+  set.seed(1234)
+
+  # Run 
+  hc <- exprs_mat %>%
+    agnes(method = i, metric = "euclidean")
+  
+  # Plot
+  plot_hc <- hc %>%
+    as.dendrogram() %>%
+    ggdendrogram(rotate = FALSE, size = 2) +
+    
+    # Title includes hc method used
+    # and the agglomerative coefficient (rounded to 2 decimals)
+    ggtitle(paste("HC:", i, round(hc$ac, 2))) 
+
+  # Print plot
+  print(plot_hc)
+  
+  # Save plot
+  ggsave(paste0("hc_plot_", i, ".png"))
+}
+```
+
+### Choose optimal HC method
+
+(the HC method above with the highest agglomerative coefficient)
+
+```{r hc_method_final}
+final_hc_method <- "ward"
+```
+
+### Compare distance methods for final HC method
+
+```{r hc_final_dist}
+### Run
+dend_euc <- exprs_mat %>%
+  agnes(method = final_hc_method, metric = "euclidean") %>%
+  as.dendrogram()
+dend_man <- exprs_mat %>%
+  agnes(method = final_hc_method, metric = "manhattan") %>%
+  as.dendrogram()
+
+### Plot together
+dend_list <- dendlist(dend_euc, dend_man)
+tanglegram(
+  dend_euc, dend_man,
+  highlight_distinct_edges = FALSE,       # Turn-off dashed lines
+  common_subtrees_color_lines = FALSE,    # Turn-off line colors
+  common_subtrees_color_branches = TRUE,  # Color common branches 
+  main = paste(
+    "entanglement =", 
+    round(entanglement(dend_list), 2)
+  )
+)
+ggsave("tanglegram.png")
+```
+
+### Determining optimal clusters
+
+Method 1: WSS ("elbow") method
+
+```{r hc_wss}
+set.seed(1234)
+fviz_nbclust(exprs_mat, FUN = hcut, method = "wss")
+ggsave("hc_wss_plot.png")
+```
+
+Method: Gap Statistic Method
+
+```{r hc_gap}
+set.seed(1234)
+fviz_nbclust(exprs_mat, FUN = hcut, nboot = 50, method = "gap_stat")
+ggsave("hc_gapstat_plot.png")
+```
+
+Set optimal # clusters
+
+```{r hc_final_cluster}
+n_clust <- 2
+```
+
+### Final HC result 
+
+```{r hc_final}
+### Calculate HC
+hc_final <- agnes(exprs_mat, method = final_hc_method, metric = "euclidean")
+
+### Cut tree
+hc_final_clusters <- cutree(hc_final, k = n_clust)
+
+### View tree 
+clust.df <- data.frame(
+  label = names(hc_final_clusters), 
+  cluster = factor(hc_final_clusters)
+)
+dendr <- as.ggdend(as.dendrogram(hc_final))
+dendr[["labels"]] <- merge(
+  dendr[["labels"]], 
+  clust.df, 
+  by = "label"
+)
+ggplot() + 
+  geom_segment(
+    data = segment(dendr), 
+    aes(x = x, y = y, xend = xend, yend = yend)
+  ) + 
+  
+  # Label clusters
+  geom_text(
+    data = label(dendr), 
+    aes(x, y, label = label, color = cluster), 
+    size = 3, hjust = 0
+  ) +
+  
+  # Flip axes
+  coord_flip() + 
+  
+  # Formating
+  scale_y_reverse(expand = c(0.2, 0)) + 
+  theme_classic() +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_blank()
+  )
+ggsave("hc_dendro.png")
+```
+
+### Summarize cluster assignments by group
+
+Add cluster assignments to phenoData
+
+```{r}
+### Add columns for HC and k-means clusters
+res_clusters <- pheno %>%
+  mutate(
+    hc_cluster = paste0("cluster_", hc_final_clusters)
+  )
+```
+
+As table
+
+```{r}
+### Get absolute number of samples in each cluster by group
+res_clusters %>%
+  select(group, hc_cluster) %>% 
+  table()
+```
+
+As figure
+
+```{r}
+### Visualize percent of samples in each cluster by group
+res_clusters %>%
+  
+  # Get percent of samples in each group in each cluster
+  dplyr::group_by(group, hc_cluster) %>% 
+  dplyr::summarise(n = n()) %>%
+  spread(hc_cluster, n) %>%
+  mutate(n_samples = sum(cluster_1, cluster_2, na.rm = TRUE)) %>%
+  mutate(
+    cluster_1 = round(100*cluster_1/n_samples),
+    cluster_2 = round(100*cluster_2/n_samples)
+  ) %>%
+  select(group, n_samples, dplyr::everything()) %>%
+  gather(cluster, percent, -group, -n_samples) %>%
+  
+  # Plot
+  ggplot(aes(x = cluster, y = group, fill = percent)) +
+  geom_tile() +
+  
+  # Formatting
+  theme_classic() +
+  ggtitle(paste0("Clustering by Group (", n_clust, " clusters)")) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0))
+```
+
+## Session info
+
+```{r sessioninfo}
+sessionInfo()
+```
